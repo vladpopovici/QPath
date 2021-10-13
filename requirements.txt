@@ -1,0 +1,7 @@
+numpy
+zarr
+simplejson
+shapely
+geojson
+scikit-image
+mahotas
