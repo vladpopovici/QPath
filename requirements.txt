@@ -5,3 +5,7 @@ shapely
 geojson
 scikit-image
 mahotas
+configargparse
+openslide
+tqdm
+python-spams

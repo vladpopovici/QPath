@@ -21,7 +21,7 @@ import skimage.draw
 import cv2
 import shapely.geometry as shg
 
-from ..annot import AnnotationObject, Polygon
+from .annot import Polygon
 
 
 ##-

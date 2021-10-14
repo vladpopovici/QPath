@@ -19,6 +19,9 @@ from .annot import Polygon
 from . import Error
 import shapely.geometry as shg
 import shapely.affinity as sha
+from .utils import geom2xy
+from .mask import add_region, apply_mask
+
 
 # from math import ceil, floor, pow, log10, log2
 # import simplejson as json
@@ -30,7 +33,6 @@ import shapely.affinity as sha
 #
 # from ._lowlevel._io import osl_read_region_
 
-# from .masks import add_region, apply_mask
 #
 
 #####
@@ -90,6 +92,11 @@ class WSIInfo(object):
         for p in self.info['pyramid']:
             if p['level'] == level:
                 return p['downsample_factor']
+
+
+    def get_native_magnification(self) -> float:
+        """Return the original magnification for the scan."""
+        return self.info['objective_power']
 
 
     def get_level_for_magnification(self, mag: float, eps=1e-6) -> int:
@@ -187,6 +194,21 @@ class NumpyImage:
 
         return img.sum() <= empty_level
 
+    @staticmethod
+    def is_almost_white(img, almost_white_level: float=254) -> bool:
+        """Is the image almost white?
+
+        Args:
+            img (numpy.ndarray): image
+            almost_white_level (int/numeric): if the average intensity per channel
+        is above the given level, decide "almost white" image.
+
+        Returns:
+            bool
+        """
+
+        return img.mean() >= almost_white_level
+
 
 #####
 class MRIBase(ABC):
@@ -223,6 +245,7 @@ class MRIBase(ABC):
         return self._wsi_info._pyramid_levels[1,:]
 
     def extent(self, level:int=0) -> (int, int):
+        # width, height for a given level
         return self._wsi_info.get_extent_at_level(level)
 
     @property
@@ -268,15 +291,17 @@ class MRIBase(ABC):
 
     @abstractmethod
     def get_region_px(self, x0: int, y0: int,
-                      width: int, height: int,
-                      level: int, as_type=np.uint8) -> np.array:
+                      width: int=0, height: int=0,
+                      level: int=0, as_type=np.uint8) -> np.array:
         """Read a region from the image source. The region is specified in
         pixel coordinates.
 
         Args:
             x0, y0 (long): top left corner of the region (in pixels, at the specified
             level)
-            width, height (long): width and height (in pixels) of the region
+            width, height (long): width and height (in pixels) of the region. If 0,
+                the corresponding dimension will be taken as layer width or height,
+                respectively.
             level (int): the magnification level to read from
             as_type: type of the pixels (default numpy.uint8)
 
@@ -337,15 +362,17 @@ class MRI(MRIBase):
         super().__init__(wsi_info)
 
     def get_region_px(self, x0: int, y0: int,
-                      width: int, height: int,
-                      level: int, as_type=np.uint8) -> np.array:
+                      width: int=0, height: int=0,
+                      level: int=0, as_type=np.uint8) -> np.array:
         """Read a region from the image source. The region is specified in
             pixel coordinates.
 
             Args:
                 x0, y0 (long): top left corner of the region (in pixels, at the specified
                 level)
-                width, height (long): width and height (in pixels) of the region
+                width, height (long): width and height (in pixels) of the region. If 0,
+                    the corresponding dimension will be taken as layer width or height,
+                    respectively.
                 level (int): the magnification level to read from
                 as_type: type of the pixels (default numpy.uint8)
 
@@ -355,6 +382,11 @@ class MRI(MRIBase):
 
         if level < 0 or level >= self.nlevels:
             raise Error("requested level does not exist")
+
+        if width == 0:
+            width = self.extent(level)[0]
+        if height == 0:
+            height = self.extent(level)[1]
 
         # check bounds:
         if x0 >= self.widths[level] or y0 >= self.heights[level] or \
@@ -385,20 +417,19 @@ class MRI(MRIBase):
         Returns:
             a numpy.ndarray
         """
-        x0, y0, x1, y1 = contour.bounds
+        x0, y0, x1, y1 = [int(_z) for _z in contour.bounds]
         x0, y0 = max(0, x0-border), max(0, y0-border)
         x1, y1 = min(x1+border, self.extent(level)[0]), \
                  min(y1+border, self.extent(level)[1])
-
         # Shift the annotation such that (0,0) will correspond to (x0, y0)
-        contour = sha.translate(-x0, -y0)
+        contour = sha.translate(contour, -x0, -y0)
 
         # Read the corresponding region
         img = self.get_region_px(x0, y0, x1-x0, y1-y0, level, as_type=np.uint8)
 
         # Prepare mask
         mask = np.zeros(img.shape[:2], dtype=np.uint8)
-        add_region(mask, contour.xy)
+        add_region(mask, geom2xy(contour))
 
         # Apply mask
         img = apply_mask(img, mask)
@@ -408,135 +439,135 @@ class MRI(MRIBase):
 
     def get_region(self, x0, y0, width, height, level, as_type=np.uint8):
         raise Error("Not yet implemented")
-#
-#
-# #####
-# class MRIExplorer(ABC):
-#     """Defines an interface for multi-resolution image explorers. An image
-#     explorer simply returns positions in an image rather than parts of the
-#     image itself. Hence, it only needs to know about the extent of the image.
-#     """
-#
-#     @abstractmethod
-#     def reset(self):
-#         """Reset the explore, next call to next() will start from the
-#         initial conditions.
-#         """
-#         pass
-#
-#     @abstractmethod
-#     def last(self):
-#         """Go to last position and return it."""
-#         pass
-#
-#     @abstractmethod
-#     def next(self):
-#         """Go to next position."""
-#         pass
-#
-#     @abstractmethod
-#     def prev(self):
-#         """Go to previous position."""
-#         pass
-#
-#     @abstractmethod
-#     def here(self):
-#         """Returns current position, does not change it."""
-#         pass
-#
-#     @abstractmethod
-#     def total_steps(self):
-#         """Returns the total number of steps to iterate over all positions
-#         in the image, according to the specific schedule.
-#         """
-#         pass
-#
-#     def __iter__(self):
-#         return self
-#
-#     def __next__(self):
-#         return self.next()
-#
-#     def __prev__(self):
-#         return self.prev()
-#
-#
-# #####
-# class MRISlidingWindow(MRIExplorer):
-#     """A sliding window image explorer. It returns successively the coordinates
-#     of the sliding window as a tuple (x0, y0, x1, y1).
-#
-#     Args:
-#         image_shape : tuple (nrows, ncols)
-#             Image shape (img.shape).
-#         w_size : tuple (width, height)
-#             Window size as a pair of width and height values.
-#         start : tuple (x0, y0)
-#             Top left corner of the first window. Defaults to (0,0).
-#         step : tuple (x_step, y_step)
-#             Step size for the sliding window, as a pair of horizontal
-#             and vertical steps. Defaults to (1,1).
-#     """
-#     def __init__(self, image_shape, w_size, start=(0,0), step=(1,1)):
-#         self._image_shape = image_shape
-#         self._w_size = w_size
-#         self._start = start
-#         self._step = step
-#         self._k = 0
-#
-#         img_h, img_w = image_shape
-#
-#         if w_size[0] < 2 or w_size[1] < 2:
-#             raise ValueError('Window size too small.')
-#
-#         if img_w < start[0] + w_size[0] or img_h < start[1] + w_size[1]:
-#             raise ValueError('Start position and/or window size out of image.')
-#
-#         x, y = np.meshgrid(np.arange(start[0], img_w - w_size[0] + 1, step[0]),
-#                            np.arange(start[1], img_h - w_size[1] + 1, step[1]))
-#
-#         self._top_left_corners = [p for p in zip(x.reshape((-1,)).tolist(),
-#                                                  y.reshape((-1,)).tolist())]
-#
-#     def total_steps(self):
-#         return len(self._top_left_corners)
-#
-#     def reset(self):
-#         self._k = 0
-#
-#     def here(self):
-#         if 0 <= self._k < self.total_steps():
-#             x0, y0 = self._top_left_corners[self._k]
-#             x1 = min(x0 + self._w_size[0], self._image_shape[1])
-#             y1 = min(y0 + self._w_size[1], self._image_shape[0])
-#
-#             return x0, y0, x1, y1
-#         raise Error("Position outside bounds")
-#
-#     def last(self):
-#         if self.total_steps() > 0:
-#             self._k = self.total_steps() - 1
-#             x0, y0, x1, y1 = self.here()
-#             return x0, y0, x1, y1
-#         else:
-#             raise Error("Empty iterator")
-#
-#     def next(self):
-#         if self._k < self.total_steps():
-#             x0, y0, x1, y1 = self.here()
-#             self._k += 1
-#             return x0, y0, x1, y1
-#         else:
-#             raise StopIteration()
-#
-#     def prev(self):
-#         if self._k >= 1:
-#             self._k -= 1
-#             x0, y0, x1, y1 = self.here()
-#             return x0, y0, x1, y1
-#         else:
-#             raise StopIteration()
-#
+
+
+#####
+class MRIExplorer(ABC):
+    """Defines an interface for multi-resolution image explorers. An image
+    explorer simply returns positions in an image rather than parts of the
+    image itself. Hence, it only needs to know about the extent of the image.
+    """
+
+    @abstractmethod
+    def reset(self):
+        """Reset the explore, next call to next() will start from the
+        initial conditions.
+        """
+        pass
+
+    @abstractmethod
+    def last(self):
+        """Go to last position and return it."""
+        pass
+
+    @abstractmethod
+    def next(self):
+        """Go to next position."""
+        pass
+
+    @abstractmethod
+    def prev(self):
+        """Go to previous position."""
+        pass
+
+    @abstractmethod
+    def here(self):
+        """Returns current position, does not change it."""
+        pass
+
+    @abstractmethod
+    def total_steps(self):
+        """Returns the total number of steps to iterate over all positions
+        in the image, according to the specific schedule.
+        """
+        pass
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next()
+
+    def __prev__(self):
+        return self.prev()
+
+
+#####
+class MRISlidingWindow(MRIExplorer):
+    """A sliding window image explorer. It returns successively the coordinates
+    of the sliding window as a tuple (x0, y0, x1, y1).
+
+    Args:
+        image_shape : tuple (nrows, ncols)
+            Image shape (img.shape).
+        w_size : tuple (width, height)
+            Window size as a pair of width and height values.
+        start : tuple (x0, y0)
+            Top left corner of the first window. Defaults to (0,0).
+        step : tuple (x_step, y_step)
+            Step size for the sliding window, as a pair of horizontal
+            and vertical steps. Defaults to (1,1).
+    """
+    def __init__(self, image_shape, w_size, start=(0,0), step=(1,1)):
+        self._image_shape = image_shape
+        self._w_size = w_size
+        self._start = start
+        self._step = step
+        self._k = 0
+
+        img_h, img_w = image_shape
+
+        if w_size[0] < 2 or w_size[1] < 2:
+            raise ValueError('Window size too small.')
+
+        if img_w < start[0] + w_size[0] or img_h < start[1] + w_size[1]:
+            raise ValueError('Start position and/or window size out of image.')
+
+        x, y = np.meshgrid(np.arange(start[0], img_w - w_size[0] + 1, step[0]),
+                           np.arange(start[1], img_h - w_size[1] + 1, step[1]))
+
+        self._top_left_corners = [p for p in zip(x.reshape((-1,)).tolist(),
+                                                 y.reshape((-1,)).tolist())]
+
+    def total_steps(self):
+        return len(self._top_left_corners)
+
+    def reset(self):
+        self._k = 0
+
+    def here(self):
+        if 0 <= self._k < self.total_steps():
+            x0, y0 = self._top_left_corners[self._k]
+            x1 = min(x0 + self._w_size[0], self._image_shape[1])
+            y1 = min(y0 + self._w_size[1], self._image_shape[0])
+
+            return x0, y0, x1, y1
+        raise Error("Position outside bounds")
+
+    def last(self):
+        if self.total_steps() > 0:
+            self._k = self.total_steps() - 1
+            x0, y0, x1, y1 = self.here()
+            return x0, y0, x1, y1
+        else:
+            raise Error("Empty iterator")
+
+    def next(self):
+        if self._k < self.total_steps():
+            x0, y0, x1, y1 = self.here()
+            self._k += 1
+            return x0, y0, x1, y1
+        else:
+            raise StopIteration()
+
+    def prev(self):
+        if self._k >= 1:
+            self._k -= 1
+            x0, y0, x1, y1 = self.here()
+            return x0, y0, x1, y1
+        else:
+            raise StopIteration()
+
 #
 # #####
 # class TiledImage(object):
