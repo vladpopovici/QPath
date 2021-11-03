@@ -9,38 +9,29 @@ QPATH.BASE: Core classes and functions.
 Defines exception classes and other basic classes.
 """
 
-__all__ = ['WSIInfo', 'NumpyImage', 'MRIBase', 'MRI', 'MRIExplorer', 'MRISlidingWindow', 'TiledImage']
+__all__ = ['WSIInfo', 'NumpyImage', 'MRI', 'SlidingWindowSampler', 'RandomWindowSampler']
 
 import zarr
 import pathlib
 import numpy as np
 from abc import ABC, abstractmethod
-from .annot import Polygon
 from . import Error
 import shapely.geometry as shg
 import shapely.affinity as sha
 from .utils import geom2xy
 from .mask import add_region, apply_mask
+from math import log2
 
-
-# from math import ceil, floor, pow, log10, log2
-# import simplejson as json
-# from skimage.io import imread, imsave
-# import os
-# import os.path
-# import shutil
-# import h5py as h5
-#
-# from ._lowlevel._io import osl_read_region_
-
-#
 
 #####
 class WSIInfo(object):
     """Hold some basic info about a WSI.
 
     Args:
-        path (str): full path to WSI file
+        path (str): full path to root of imported WSI file. This is the folder
+            containing a 'pyramid' ZARR group with datasets for each level. Normally,
+            for an imported slide <SLIDE_NAME>, the canonical path should be
+            .../<SLIDE_NAME>/slide/pyramid.zarr.
 
     Attributes:
         path (str): full path to WSI file
@@ -70,8 +61,10 @@ class WSIInfo(object):
 
     def __init__(self, path):
         self.path = pathlib.Path(path)
+
         with zarr.open(self.path, mode='r') as z:
             self.info = z.attrs['metadata']
+            self.info['pyramid'] = z.attrs['pyramid']
 
         self._pyramid_levels = np.zeros((2, len(self.info['pyramid'])), dtype=int)
         for p in self.info['pyramid']:
@@ -211,46 +204,59 @@ class NumpyImage:
 
 
 #####
-class MRIBase(ABC):
-    """Base class for MultiResolutionImages presenting a uniform interface for retrieving
-    pixels and regions. Note that changes in image data are not propagated back to the original
-    image. This is an abstract class.
+class MRI(object):
+    """MultiResolution Image - a simple and convenient interface to access pixels from a
+    pyramidal image. The image is supposed to by stored in ZARR format and to have an
+    attributre 'pyramid' describing the properties of the pyramid levels. There is no
+    information related to resolutions etc, these are charaterstic for a slide image -
+    see WSIInfo.
 
     Args:
-        wsi_info (WSIInfo): an info object for a whole slide image
+        path (str): folder with a ZARR store providing the levels (indexed 0, 1, ...)
+        of the pyramid
 
     Attributes:
-        info (WSIInfo)
+        _path (Path)
+        _pyramid (dict)
     """
+    _path = None
+    _pyramid = None
+    _pyramid_levels = None
 
-    def __init__(self, wsi_info: WSIInfo):
-        self._wsi_info = wsi_info
+    def __init__(self, path: str):
+        self._path = pathlib.Path(path)
 
+        with zarr.open(self.path, mode='r') as z:
+            self._pyramid = z.attrs['pyramid']
 
-    @property
-    def metadata(self):
-        """Return the dictionary with metdata (see WSIInfo)."""
-        return self._wsi_info.info
+        self._pyramid_levels = np.zeros((2, len(self._pyramid)), dtype=int)
+        self._downsample_factors = np.zeros((len(self._pyramid)), dtype=int)
+        for p in self._pyramid:
+            self._pyramid_levels[:, p['level']] = [p['width'], p['height']]
+            self._downsample_factors[p['level']] = p['downsample_factor']
+
 
     @property
     def path(self) -> pathlib.Path:
-        return self._wsi_info.path
+        return self._path
 
     @property
     def widths(self) -> np.array:
-        return self._wsi_info._pyramid_levels[0,:]
+        # All widths for the pyramid levels
+        return self._pyramid_levels[0,:]
 
     @property
     def heights(self) -> np.array:
-        return self._wsi_info._pyramid_levels[1,:]
+        # All heights for the pyramid levels
+        return self._pyramid_levels[1,:]
 
     def extent(self, level:int=0) -> (int, int):
         # width, height for a given level
-        return self._wsi_info.get_extent_at_level(level)
+        return tuple(self._pyramid_levels[:, level])
 
     @property
     def nlevels(self) -> int:
-        return self._wsi_info.level_count()
+        return self._pyramid_levels.shape[1]
 
     def between_level_scaling_factor(self, from_level:int, to_level:int) -> float:
         """Return the scaling factor for converting coordinates (magnification)
@@ -263,8 +269,7 @@ class MRIBase(ABC):
         Returns:
             float
         """
-        f = self._wsi_info.downsample_factor(from_level) / \
-            self._wsi_info.downsample_factor(to_level)
+        f = self._downsample_factors[from_level] / self._downsample_factors[to_level]
 
         return f
 
@@ -289,80 +294,9 @@ class MRIBase(ABC):
 
         return x, y
 
-    @abstractmethod
-    def get_region_px(self, x0: int, y0: int,
-                      width: int=0, height: int=0,
-                      level: int=0, as_type=np.uint8) -> np.array:
-        """Read a region from the image source. The region is specified in
-        pixel coordinates.
-
-        Args:
-            x0, y0 (long): top left corner of the region (in pixels, at the specified
-            level)
-            width, height (long): width and height (in pixels) of the region. If 0,
-                the corresponding dimension will be taken as layer width or height,
-                respectively.
-            level (int): the magnification level to read from
-            as_type: type of the pixels (default numpy.uint8)
-
-        Returns:
-            a numpy.ndarray
-        """
-        pass
-
-    @abstractmethod
-    def get_polygonal_region_px(self, contour: shg.Polygon, level: int,
-                                border: int=0, as_type=np.uint8) -> np.array:
-        """Returns a rectangular view of the image source that minimally covers a closed
-        contour (polygon). All pixels outside the contour are set to 0.
-
-        Args:
-            contour (shapely.geometry.Polygon): a closed polygonal line given in
-                terms of its vertices. The contour's coordinates are supposed to be
-                precomputed and to be represented in pixel units at the desired level.
-            level (int): image pyramid level
-            border (int): if > 0, take this many extra pixels in the rectangular
-                region (up to the limits on the image size)
-            as_type: pixel type for the returned image (array)
-
-        Returns:
-            a numpy.ndarray
-        """
-        pass
-
-    @abstractmethod
-    def get_region(self, x0: int, y0: int, width: int, height: int, level: int, as_type=np.uint8) -> np.array:
-        """Read a region from the image source. The region is specified in
-        slide coordinates.
-
-        Args:
-            x0, y0 (long): top left corner of the region (in slide units)
-            width, height (long): width and height (in slide units) of the region
-            level (int): the magnification level to read from
-            as_type: type of the pixels (default numpy.uint8)
-
-        Returns:
-            a numpy.ndarray (OpenCV channel ordering: (A)BGR)
-        """
-        pass
-
-
-#####
-class MRI(MRIBase):
-    """A multi-resolution image backed by a ZARR store.
-
-    Args:
-        wsi_info (WSIInfo): info about the slide
-
-    Attributes:
-        see MRIBase
-    """
-
-    def __init__(self, wsi_info: WSIInfo):
-        super().__init__(wsi_info)
 
     def get_region_px(self, x0: int, y0: int,
-                      width: int=0, height: int=0,
+                      width: int, height: int,
                       level: int=0, as_type=np.uint8) -> np.array:
         """Read a region from the image source. The region is specified in
             pixel coordinates.
@@ -370,9 +304,7 @@ class MRI(MRIBase):
             Args:
                 x0, y0 (long): top left corner of the region (in pixels, at the specified
                 level)
-                width, height (long): width and height (in pixels) of the region. If 0,
-                    the corresponding dimension will be taken as layer width or height,
-                    respectively.
+                width, height (long): width and height (in pixels) of the region.
                 level (int): the magnification level to read from
                 as_type: type of the pixels (default numpy.uint8)
 
@@ -383,11 +315,6 @@ class MRI(MRIBase):
         if level < 0 or level >= self.nlevels:
             raise Error("requested level does not exist")
 
-        if width == 0:
-            width = self.extent(level)[0]
-        if height == 0:
-            height = self.extent(level)[1]
-
         # check bounds:
         if x0 >= self.widths[level] or y0 >= self.heights[level] or \
                 x0 + width > self.widths[level] or \
@@ -395,7 +322,26 @@ class MRI(MRIBase):
             raise Error("region out of layer's extent")
 
         with zarr.open_group(self.path, mode='r') as zarr_root:
-            img = np.array(zarr_root['pyramid/'+str(level)][y0:y0+height, x0:x0+width, :], dtype=as_type)
+            img = np.array(zarr_root[str(level)][y0:y0+height, x0:x0+width, :], dtype=as_type)
+
+        return img
+
+
+    def get_plane(self, level: int = 0, as_type=np.uint8) -> np.array:
+        """Read a whole plane from the image pyramid and return it as a Numpy array.
+
+        Args:
+            level (int): pyramid level to read
+            as_type: type of the pixels (default numpy.uint8)
+
+        Returns:
+            a numpy.ndarray
+        """
+        if level < 0 or level >= self.nlevels:
+            raise Error("requested level does not exist")
+
+        with zarr.open_group(self.path, mode='r') as zarr_root:
+            img = np.array(zarr_root[str(level)][...], dtype=as_type)
 
         return img
 
@@ -436,16 +382,13 @@ class MRI(MRIBase):
 
         return img
 
-
-    def get_region(self, x0, y0, width, height, level, as_type=np.uint8):
-        raise Error("Not yet implemented")
+##
 
 
-#####
-class MRIExplorer(ABC):
-    """Defines an interface for multi-resolution image explorers. An image
-    explorer simply returns positions in an image rather than parts of the
-    image itself. Hence, it only needs to know about the extent of the image.
+class WindowSampler(ABC):
+    """
+    Defines an interface for an image sampler that returns rectangular
+    regions from the image.
     """
 
     @abstractmethod
@@ -482,6 +425,45 @@ class MRIExplorer(ABC):
         """
         pass
 
+    @staticmethod
+    def _corners_to_poly(x0, y0, x1, y1):
+        """Returns a Shapely Polygon with all four vertices of the window
+        defined by (x0,y0) -> (x1,y1).
+        """
+        return shg.Polygon([(x0, y0), (x0, y1), (x1, y1), (x1, y0)])
+
+    @staticmethod
+    def _check_window(x0: int, y0: int, x1: int, y1: int,
+                      width: int, height: int, clip: bool = True) -> tuple:
+        """Checks whether the coordinates of the window are valid and, eventually
+        (only if clip is True), truncates the window to fit the image extent
+        given by width and height.
+
+        Args:
+            x0, y0 : int
+                Top-left corner of the window.
+            x1, y1 : int
+                Bottom-right corner of the window.
+            width, height : int
+                Image shape.
+            clip : bool
+                Whether the window should be clipped to image boundary.
+
+        Return:
+            a tuple (x0, y0, x1, y1) of window vertices or None if the
+            window is not valid (e.g. negative coordinates).
+        """
+        if x0 < 0 or y0 < 0 or x1 < 0 or y1 < 0:
+            return None
+        if x0 >= width or y0 >= height:
+            return None
+
+        if clip:
+            x1 = min(x1, width)
+            y1 = min(y1, height)
+
+        return x0, y0, x1, y1
+
     def __iter__(self):
         return self
 
@@ -492,13 +474,13 @@ class MRIExplorer(ABC):
         return self.prev()
 
 
-#####
-class MRISlidingWindow(MRIExplorer):
-    """A sliding window image explorer. It returns successively the coordinates
+class SlidingWindowSampler(WindowSampler):
+    """
+    A sliding window image sampler. It returns successively the coordinates
     of the sliding window as a tuple (x0, y0, x1, y1).
 
     Args:
-        image_shape : tuple (nrows, ncols)
+        image_shape : tuple (img_width, img_height)
             Image shape (img.shape).
         w_size : tuple (width, height)
             Window size as a pair of width and height values.
@@ -507,15 +489,27 @@ class MRISlidingWindow(MRIExplorer):
         step : tuple (x_step, y_step)
             Step size for the sliding window, as a pair of horizontal
             and vertical steps. Defaults to (1,1).
+        poly : shapely.geometry.Polygon
+            (if not None) Defines the region within which the windows will be generated.
+        nv_inside : int
+            number of corners/vertices of the the window required to be inside the
+            polygon defining the region. This relaxes the constraint that whole window
+            must lie within the polygon. Must be between 1 and 4._
     """
-    def __init__(self, image_shape, w_size, start=(0,0), step=(1,1)):
+
+    def __init__(self, image_shape: tuple, w_size: tuple,
+                 start: tuple = (0, 0), step=(1, 1), poly: shg.Polygon = None,
+                 nv_inside: int = 4):
         self._image_shape = image_shape
         self._w_size = w_size
         self._start = start
         self._step = step
         self._k = 0
+        self._poly = poly
 
-        img_h, img_w = image_shape
+        nv_inside = max(1, min(nv_inside, 4))  # >=1 && <=4
+
+        img_w, img_h = image_shape
 
         if w_size[0] < 2 or w_size[1] < 2:
             raise ValueError('Window size too small.')
@@ -526,8 +520,27 @@ class MRISlidingWindow(MRIExplorer):
         x, y = np.meshgrid(np.arange(start[0], img_w - w_size[0] + 1, step[0]),
                            np.arange(start[1], img_h - w_size[1] + 1, step[1]))
 
-        self._top_left_corners = [p for p in zip(x.reshape((-1,)).tolist(),
-                                                 y.reshape((-1,)).tolist())]
+        tmp_top_left_corners = [p for p in zip(x.reshape((-1,)).tolist(),
+                                               y.reshape((-1,)).tolist())]
+
+        if self._poly is None:
+            self._top_left_corners = tmp_top_left_corners
+        else:
+            # need to filter out regions outside the Polygon
+            self._top_left_corners = []
+            for x0, y0 in tmp_top_left_corners:
+                x1 = x0 + self._w_size[0]
+                y1 = y0 + self._w_size[1]
+                t = WindowSampler._check_window(x0, y0, x1, y1,
+                                                img_w, img_h, clip=True)
+                if t is None:
+                    continue
+                x0, y0, x1, y1 = t
+                w = [int(shg.Point(p).within(self._poly)) for p in [(x0, y0), (x0, y1), (x1, y1), (x1, y0)]]
+                if np.array(w).sum() >= nv_inside:
+                    self._top_left_corners.append((x0, y0))
+
+        return
 
     def total_steps(self):
         return len(self._top_left_corners)
@@ -538,11 +551,11 @@ class MRISlidingWindow(MRIExplorer):
     def here(self):
         if 0 <= self._k < self.total_steps():
             x0, y0 = self._top_left_corners[self._k]
-            x1 = min(x0 + self._w_size[0], self._image_shape[1])
-            y1 = min(y0 + self._w_size[1], self._image_shape[0])
+            x1 = min(x0 + self._w_size[0], self._image_shape[0])
+            y1 = min(y0 + self._w_size[1], self._image_shape[1])
 
             return x0, y0, x1, y1
-        raise Error("Position outside bounds")
+        raise RuntimeError("Position outside bounds")
 
     def last(self):
         if self.total_steps() > 0:
@@ -550,7 +563,7 @@ class MRISlidingWindow(MRIExplorer):
             x0, y0, x1, y1 = self.here()
             return x0, y0, x1, y1
         else:
-            raise Error("Empty iterator")
+            raise RuntimeError("Empty iterator")
 
     def next(self):
         if self._k < self.total_steps():
@@ -567,6 +580,125 @@ class MRISlidingWindow(MRIExplorer):
             return x0, y0, x1, y1
         else:
             raise StopIteration()
+
+
+class RandomWindowSampler(WindowSampler):
+    """
+    A random window image sampler. It returns a sequence of random window coordinates
+    (x0, y0, x1, y1) within the image.
+
+    Args:
+        image_shape : tuple (img_width, img_height)
+            Image shape (img.shape).
+        w_size : tuple (width, height)
+            Window size as a pair of width and height values.
+        n : int
+            Number of windows to return.
+        poly : shapely.geometry.Polygon
+            (if not None) Defines the region within which the windows will be generated.
+        rng_seed : int or None
+            random number generator seed for initialization in a known state. If None,
+            the seed is set by the system.
+        nv_inside : int
+            number of corners/vertices of the the window required to be inside the
+            polygon defining the region. This relaxes the constraint that whole window
+            must lie within the polygon. Must be between 1 and 4.
+    """
+
+    def __init__(self, image_shape: tuple, w_size: tuple, n: int,
+                 poly: shg.Polygon = None, rng_seed: int = None, nv_inside: int = 4):
+        self._image_shape = image_shape
+        self._w_size = w_size
+        self._poly = poly
+        self._n = n
+        self._k = 0
+        self._rng_seed = rng_seed
+        self._rng = np.random.default_rng(rng_seed)
+
+        nv_inside = max(1, min(nv_inside, 4))  # >=1 && <=4
+        img_w, img_h = image_shape
+
+        if w_size[0] < 2 or w_size[1] < 2:
+            raise ValueError('Window size too small.')
+
+        if img_w < w_size[0] or img_h < w_size[1]:
+            raise ValueError('Window size larger than image.')
+
+        if self._poly is None:
+            self._top_left_corners = []
+            k = 0
+            while k < self._n:
+                x0 = self._rng.integers(low=0, high=img_w - self._w_size[0], size=1)[0]
+                y0 = self._rng.integers(low=0, high=img_h - self._w_size[1], size=1)[0]
+                x1 = x0 + self._w_size[0]
+                y1 = y0 + self._w_size[1]
+                t = WindowSampler._check_window(x0, y0, x1, y1, img_w, img_h, clip=True)
+                if t is None:
+                    continue
+                x0, y0, x1, y1 = t
+                # finally, a valid window
+                self._top_left_corners.append((x0, y0))
+                k += 1
+        else:
+            # need to filter out regions outside the Polygon
+            k = 0
+            self._top_left_corners = []
+            while k < self._n:
+                x0 = self._rng.integers(low=0, high=img_w - self._w_size[0], size=1)[0]
+                y0 = self._rng.integers(low=0, high=img_h - self._w_size[1], size=1)[0]
+                x1 = x0 + self._w_size[0]
+                y1 = y0 + self._w_size[1]
+                t = WindowSampler._check_window(x0, y0, x1, y1, img_w, img_h, clip=True)
+                if t is None:
+                    continue
+                x0, y0, x1, y1 = t
+                w = [int(shg.Point(p).within(self._poly)) for p in [(x0, y0), (x0, y1), (x1, y1), (x1, y0)]]
+                if np.array(w).sum() >= nv_inside:
+                    self._top_left_corners.append((x0, y0))
+                    k += 1
+        return
+
+    def total_steps(self):
+        return self._n
+
+    def reset(self):
+        self._k = 0
+
+    def here(self):
+        if 0 <= self._k < self.total_steps():
+            x0, y0 = self._top_left_corners[self._k]
+            # bounds where checked in the constructor
+            x1 = x0 + self._w_size[0]
+            y1 = y0 + self._w_size[1]
+
+            return x0, y0, x1, y1
+
+        raise RuntimeError("Position outside bounds")
+
+    def last(self):
+        if self.total_steps() > 0:
+            self._k = self.total_steps() - 1
+            x0, y0, x1, y1 = self.here()
+            return x0, y0, x1, y1
+        else:
+            raise RuntimeError("Empty iterator")
+
+    def next(self):
+        if self._k < self.total_steps():
+            x0, y0, x1, y1 = self.here()
+            self._k += 1
+            return x0, y0, x1, y1
+        else:
+            raise StopIteration()
+
+    def prev(self):
+        if self._k >= 1:
+            self._k -= 1
+            x0, y0, x1, y1 = self.here()
+            return x0, y0, x1, y1
+        else:
+            raise StopIteration()
+##
 
 #
 # #####

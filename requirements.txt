@@ -9,3 +9,4 @@ configargparse
 openslide
 tqdm
 python-spams
+pyvips

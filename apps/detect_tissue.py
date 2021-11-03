@@ -26,18 +26,16 @@ __description__ = {
 import simplejson as json
 import geojson as gjson
 import configargparse as opt
-import os.path
+import numpy as np
+from pathlib import Path
 
 from shapely.affinity import translate
-from shapely.geometry import Polygon
 
 from qpath.base import WSIInfo, MRI
 from qpath.annot import Annotation
-from qpath.annot.asap import annotation_to_asap
 from qpath.mask import mask_to_external_contours
 from qpath.tissue import detect_foreground
-from qpath.color import RGBA2RGB
-
+from qpath.utils import NumpyJSONEncoder
 
 # minimum object sizes (areas, in px^2) for different magnifications to be considered as "interesting"
 min_obj_size = {'0.3125': 1500, '1.25': 50000, '2.5': 100000, '5.0': 500000}
@@ -47,16 +45,13 @@ WORK_MAG_2 = 2.5
 
 def main():
     p = opt.ArgumentParser(description="Detect tissue regions in a whole slide image.")
-    p.add_argument("--wsi", action="store", help="whole slide image to process", required=True)
-    p.add_argument("--out", action="store", help="JSON database for storing (adding) the resulting annotation to",
+    p.add_argument("--mri_path", action="store", help="root folder for the multiresolution image (ZARR format)",
+                   required=True)
+    p.add_argument("--out", action="store",
+                   help="JSON file for storing the resulting annotation (will be saved to ../annot/ relative to ZARR path)",
                    required=True)
     p.add_argument("--annotation_name", action="store", help="name of the resulting annotation",
                    default="tissue", required=False)
-    p.add_argument("--simple_json", action="store_true",
-                   help="save annotation in a simplified JSON format instead of GeoJSON",
-                   required=False)
-    p.add_argument("--asap_xml", action="store", default=None, required=False,
-                   help="if provided, save the annotation to ASAP XML file as well")
     p.add_argument("--min_area", action="store", type=int, default=None,
                    help="minimum area of a tissue region", required=False)
     p.add_argument("--he", action="store_true", help="use H&E-specific method for detecting the objects")
@@ -70,30 +65,27 @@ def main():
     else:
         min_obj_size[str(WORK_MAG_2)] = args.min_area
 
+    in_path = Path(args.mri_path).expanduser().absolute()
+    out_path = (in_path.parent.parent / 'annot').expanduser().absolute()
     __description__['params'] = vars(args)
+    __description__['input'] = [str(in_path)]
+    __description__['output'] = [str(out_path / args.out)]
 
-    input_path = os.path.abspath(os.path.dirname(args.wsi))
-    input_file = os.path.basename(args.wsi)
-    __description__['input'] = [input_path + '/' + input_file]
-
-    output_path = os.path.abspath(os.path.dirname(args.out))
-    output_file = os.path.basename(args.out)
-    __description__['output'] = [output_path + '/' + output_file]
 
     if args.track_processing:
-        input_file_noext = os.path.splitext(input_file)[0]
-        with open(output_path + '/' + input_file_noext + '-RUN-detect_tissue.json', 'w') as f:
+        (out_path.parent / '.run').mkdir(exist_ok=True)
+        with open(out_path.parent / '.run' / 'run-detect_tissue.json', 'w') as f:
             json.dump(__description__, f, indent=2)
 
     # print(__description__)
 
-    wsi = WSIInfo(args.wsi)
-    img_src = MRI(wsi)
+    wsi = WSIInfo(in_path)
+    img_src = MRI(in_path)
 
     # use a two pass strategy: first detect a bounding box, then zoom-in and
     # detect the final mask
     level = wsi.get_level_for_magnification(WORK_MAG_1)
-    img = img_src.get_region_px(0, 0, level)
+    img = img_src.get_plane(level=level)
     mask, _ = detect_foreground(img, method='fesi', min_area=min_obj_size[str(WORK_MAG_1)])
     contours = mask_to_external_contours(mask, approx_factor=0.0001)
 
@@ -116,9 +108,9 @@ def main():
 
     # print("ROI @{}x: {},{} -> {},{}".format(WORK_MAG_2, xmin, ymin, xmax, ymax))
     level = wsi.get_level_for_magnification(WORK_MAG_2)
-    img = img_src.getRegion(xmin, ymin,
-                            width=xmax - xmin, height=ymax - ymin,
-                            level=level, as_type=np.uint8)
+    img = img_src.get_region_px(xmin, ymin,
+                                width=xmax - xmin, height=ymax - ymin,
+                                level=level, as_type=np.uint8)
     # print("Image size 2: {}x{}".format(img.shape[0], img.shape[1]))
 
     if args.he:
@@ -153,18 +145,11 @@ def main():
     img_shape = img_src.extent(0)
     annot._image_shape = dict(width=img_shape[0], height=img_shape[1])
 
-    # print(annot.asdict())
-    with open(args.out, 'w') as f:
-        if args.simple_json:
-            json.dump(annot.asdict(), f, indent=None)
-        else:
-            gjson.dump(annot.asGeoJSON(), f)
-
-    # print(annot.asdict())
-    if args.asap_xml is not None:
-        annotation_to_asap(annot, args.asap_xml)
+    with open(out_path / args.out , 'w') as f:
+        gjson.dump(annot.asGeoJSON(), f, cls=NumpyJSONEncoder)
 
     return
+##
 
 
 if __name__ == '__main__':

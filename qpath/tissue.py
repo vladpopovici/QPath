@@ -239,6 +239,7 @@ def _simple_foreground_detection(img, **kwargs):
     mask = skm.remove_small_objects(mask, min_size=_min_area, in_place=True)
 
     mask = mh.close_holes(mask)
+    mask = mh.morph.open(mask, mh.disk(5))
 
     return img_as_bool(mask), _th
 
@@ -282,6 +283,7 @@ def _fesi_foreground_detection(img: np.ndarray, **kwargs):
     mask = skm.remove_small_objects(mask, min_size=_min_area, in_place=True)
     mask = mh.close_holes(mask)
     mask = mh.morph.erode(mask, mh.disk(5))
+    mask = mh.morph.open(mask, mh.disk(5))
 
     return img_as_bool(mask), None
 

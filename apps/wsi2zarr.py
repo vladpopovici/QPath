@@ -33,7 +33,7 @@ from tqdm import tqdm, trange
 def main():
     p = opt.ArgumentParser(description="Convert an image from WSI format to ZARR (pseudo-OME).")
     p.add_argument("--input", action="store", help="whole slide image to process", required=True)
-    p.add_argument("--output", action="store", help="path to ZARR root folder (store) for the result",
+    p.add_argument("--output", action="store", help="root folder for the result (i.e. path without SLIDE name - see Conventions.md)",
                    required=True)
     p.add_argument("--autocrop", action="store_true",
                    help="""try to crop the image to the bounding box of the tissue (if OpenSlide provides one!)"""
@@ -43,7 +43,7 @@ def main():
     p.add_argument("--band_size", action="store", type=int, default=1528,
                    help="the slide image is read/written in bands of at most <band_size> height", required=False)
     p.add_argument("--track_processing", action="store_true",
-                   help="should this action be stored in the <-RUN-wsi_2zarr.json> file for the slide?")
+                   help="should this action be stored in the ./run/run-wsi_2zarr.json file for the slide?")
 
     args = p.parse_args()
 
@@ -52,9 +52,15 @@ def main():
     __description__['output'] = [args.output]
 
     in_path = pathlib.Path(args.input)
-    out_path = pathlib.Path(args.output)
+    slide_name = in_path.stem
+    out_path = pathlib.Path(args.output) / slide_name
+
+    if not out_path.exists():
+        out_path.mkdir()
+
+    (out_path/'.run').mkdir(exist_ok=True)
     if args.track_processing:
-        with open(out_path.with_name(in_path.stem + '-RUN-wsi2zarr.json'), 'w') as f:
+        with open(out_path/'.run'/'run-wsi2zarr.json', 'w') as f:
             json.dump(__description__, f, indent=2)
 
     # modified from https://github.com/sofroniewn/image-demos/blob/4ddcfc23980e37fbe5eda8150c14af8220369f24/helpers/make_2D_zarr_pathology.py
@@ -82,7 +88,7 @@ def main():
         # print("Base ROI: ", base_roi)
         n_pyr_levels = int(orig_metadata['openslide.level-count'])
         pyramid = []
-        with zarr.open_group(str(out_path), mode='w') as root:
+        with zarr.open_group(str(out_path/'slide/pyramid.zarr'), mode='w') as root:
             for i in trange(n_pyr_levels, desc='Pyramid'):
                 if args.autocrop or args.crop is not None:
                     roi = tuple([int(2 ** (-i) * r) for r in base_roi])
@@ -98,7 +104,7 @@ def main():
                     'downsample_factor': 2**i
                 })
                 shape = (roi[3], roi[2], 3)
-                grp = root.create_dataset('pyramid/' + str(i),
+                grp = root.create_dataset(str(i),
                                           shape=shape,
                                           chunks=(4096, 4096, None),
                                           dtype='uint8')
@@ -134,10 +140,16 @@ def main():
                 'resolution_x_level_0': float(orig_metadata['openslide.mpp-x']),
                 'resolution_y_level_0': float(orig_metadata['openslide.mpp-y']),
                 'resolution_units': 'microns',
-                'background': orig_metadata['openslide.background-color'],
-                'pyramid': pyramid,
-                'image_path':{'0': "pyramid"}
+                'background': orig_metadata['openslide.background-color']
             }
+            root.attrs['pyramid'] = pyramid
+            root.attrs['pyramid_desc'] = 'imported slide pyramid'
+
+            # prepare the rest of the structure
+            with open(out_path/'slide'/'.metadata', 'w') as f:
+                json.dump(root.attrs.asdict(), f)
+    (out_path/'annot').mkdir(exist_ok=True)
+    (out_path/'.annot_idx.json').touch(exist_ok=True)
 
     return
 
