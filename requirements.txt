@@ -10,3 +10,4 @@ openslide
 tqdm
 python-spams
 pyvips
+tinydb

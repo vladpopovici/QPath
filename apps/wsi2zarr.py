@@ -35,6 +35,8 @@ def main():
     p.add_argument("--input", action="store", help="whole slide image to process", required=True)
     p.add_argument("--output", action="store", help="root folder for the result (i.e. path without SLIDE name - see Conventions.md)",
                    required=True)
+    p.add_argument("--new_slide_name", action="store", help="use the new slide name insted of the one infer from <input>",
+                   default=None, required=False)
     p.add_argument("--autocrop", action="store_true",
                    help="""try to crop the image to the bounding box of the tissue (if OpenSlide provides one!)"""
                         """If <autocrop> is provided, <crop> is overlooked.""")
@@ -52,7 +54,7 @@ def main():
     __description__['output'] = [args.output]
 
     in_path = pathlib.Path(args.input)
-    slide_name = in_path.stem
+    slide_name = in_path.name if args.new_slide_name is None else args.new_slide_name
     out_path = pathlib.Path(args.output) / slide_name
 
     if not out_path.exists():

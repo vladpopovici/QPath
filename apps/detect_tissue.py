@@ -9,13 +9,14 @@
 # Licensed under the MIT License. See LICENSE file in root folder.
 #############################################################################
 from datetime import datetime
+import hashlib
 
 _time = datetime.now()
-
 __author__ = "Vlad Popovici <popovici@bioxlab.org>"
 __version__ = "1.0"
 __description__ = {
     'name': 'detect_tissue',
+    'unique_id' : hashlib.md5(str.encode('detect_tissue' + __version__)).hexdigest(),
     'version': __version__,
     'timestamp': _time.isoformat(),
     'input': [None],
@@ -23,6 +24,7 @@ __description__ = {
     'params': dict()
 }
 
+from tinydb import TinyDB, Query
 import simplejson as json
 import geojson as gjson
 import configargparse as opt
@@ -147,6 +149,18 @@ def main():
 
     with open(out_path / args.out , 'w') as f:
         gjson.dump(annot.asGeoJSON(), f, cls=NumpyJSONEncoder)
+
+    annot_idx = out_path.parent / '.annot_idx.json'
+    with TinyDB(annot_idx) as db:
+        q = Query()
+        r = db.search(q.unique_id == __description__['unique_id'])
+        if len(r) == 0:
+            # empty DB or no such record
+            db.insert({'unique_id' : __description__['unique_id'],
+                       'annotator': __description__['name'], 'parameters': __description__['params']})
+        else:
+            db.update({'annotator': __description__['name'], 'parameters': __description__['params']},
+                      q.unique_id == __description__['unique_id'])
 
     return
 ##
