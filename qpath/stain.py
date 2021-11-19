@@ -413,7 +413,8 @@ class StainNormalizerFactory(object):
 
     @staticmethod
     def getVahadaneNormalizer():
-        pass
+        return VahadaneNormalizer()
+
 ## end StainNormalizerFactory
 
 ### local functions
