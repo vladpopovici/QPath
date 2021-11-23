@@ -5,6 +5,8 @@ from qpath.base import MRI, RandomWindowSampler
 from qpath.annot import Annotation
 from pathlib import Path
 import geojson
+import zarr
+import numpy as np
 
 PATH_ARCHIVE = Path("/teradata/data/COAD/colobiome_histopath/")
 PATH_TILES = Path("/bigdata/colobiome/train/tiles")
@@ -14,7 +16,15 @@ PYR_LEVEL = 1   # pyramid level to use (0: max res (20x in our case), 1: half th
 MAX_MAGNIF = 20 # corresponding to level 0
 TILE_SHAPE = (256, 256)  # tile shape (width, height)
 
+EFFECTIVE_MAGNIF = MAX_MAGNIF / 2**PYR_LEVEL
+DST_ZARR = f"tiles_{EFFECTIVE_MAGNIF}x_{TILE_SHAPE[0]}_by_{TILE_SHAPE[1]}.zarr"
 
+
+#ztiles = zroot.create_dataset("tiles")
+#zroot.create_group("coords")
+#zroot.create_group("files")
+
+first_time = True
 slides = sorted([s for s in PATH_ARCHIVE.glob("SB*") if s.is_dir()])[0:N_SLIDES]
 for slide in slides:
     annot = Annotation("annotation", {'width':0, 'height': 0}, 20.0)  # dummy object
@@ -22,7 +32,7 @@ for slide in slides:
     with open(slide / "annot/tissue_contour.geojson", 'r') as f:
         d = geojson.load(f)
     annot.fromGeoJSON(d)
-    annot.set_magnification(MAX_MAGNIF / 2**PYR_LEVEL)  # bring the magnification to the desired level
+    annot.set_magnification(EFFECTIVE_MAGNIF)  # bring the magnification to the desired level
 
     # find the largest tissue area:
     max_area = 0
@@ -43,5 +53,18 @@ for slide in slides:
         tile = wsi.get_region_px(x0, y0, TILE_SHAPE[0], TILE_SHAPE[1], level=PYR_LEVEL)
         all_tiles.append(tile)
         all_tiles_coords.append(w)
+
+    if first_time:
+        zroot = zarr.group(PATH_TILES / DST_ZARR)
+        _ = zroot.create_dataset('tiles', data=np.array(all_tiles))
+        _ = zroot.create_dataset('coords', data=np.array(all_tiles_coords))
+        first_time = False
+    else:
+        zroot = zarr.group(PATH_TILES / DST_ZARR)
+        zroot['/tiles'].append(np.array(all_tiles))
+        zroot['/coords'].append(np.array(all_tiles_coords))
+
+
+
 
 
