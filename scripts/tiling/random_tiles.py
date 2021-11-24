@@ -7,10 +7,12 @@ from pathlib import Path
 import geojson
 import zarr
 import numpy as np
+import tqdm
+
 
 PATH_ARCHIVE = Path("/teradata/data/COAD/colobiome_histopath/")
 PATH_TILES = Path("/bigdata/colobiome/train/tiles")
-N_SLIDES = 400  # use first N_SLIDES only
+N_SLIDES = 600  # use first N_SLIDES only
 N_TILES  = 500  # generate at most N_TILES frome each slide
 PYR_LEVEL = 1   # pyramid level to use (0: max res (20x in our case), 1: half the max res, etc)
 MAX_MAGNIF = 20 # corresponding to level 0
@@ -26,7 +28,9 @@ DST_ZARR = f"tiles_{EFFECTIVE_MAGNIF}x_{TILE_SHAPE[0]}_by_{TILE_SHAPE[1]}.zarr"
 
 first_time = True
 slides = sorted([s for s in PATH_ARCHIVE.glob("SB*") if s.is_dir()])[0:N_SLIDES]
-for slide in slides:
+slides_for_tiles_idx = []
+last_idx = 0
+for slide in tqdm.tqdm(slides):
     annot = Annotation("annotation", {'width':0, 'height': 0}, 20.0)  # dummy object
     d = dict()
     with open(slide / "annot/tissue_contour.geojson", 'r') as f:
@@ -54,6 +58,9 @@ for slide in slides:
         all_tiles.append(tile)
         all_tiles_coords.append(w)
 
+    slides_for_tiles_idx.append([last_idx, last_idx + len(all_tiles)])
+    last_idx += len(all_tiles)
+
     if first_time:
         zroot = zarr.group(PATH_TILES / DST_ZARR)
         _ = zroot.create_dataset('tiles', data=np.array(all_tiles))
@@ -64,7 +71,11 @@ for slide in slides:
         zroot['/tiles'].append(np.array(all_tiles))
         zroot['/coords'].append(np.array(all_tiles_coords))
 
-
+# finally save the info about source images and corresponding tile
+# index ranges:
+zroot = zarr.group(PATH_TILES / DST_ZARR)
+_ = zroot.create_dataset('/source', data=[str(s) for s in slides], dtype=str)
+_ = zroot.create_dataset('/source_idx', data=np.array(slides_for_tiles_idx), dtype=int)
 
 
 
