@@ -125,7 +125,7 @@ def rgb2he_macenko(img, D=None, alpha=1.0, beta=0.15, white=255.0,
     if not return_deconvolution_matrix:
         D = None
 
-    return rescale_intensity(img_res[:,:,0], out_range=(0, 1)), \
+    return rescale_intensity(img_res[:,:,0], out_range=(0,1)), \
            rescale_intensity(img_res[:,:,1], out_range=(0,1)), \
            rescale_intensity(img_res[:,:,2], out_range=(0,1)), \
            D

@@ -188,19 +188,21 @@ class NumpyImage:
         return img.sum() <= empty_level
 
     @staticmethod
-    def is_almost_white(img, almost_white_level: float=254) -> bool:
+    def is_almost_white(img, almost_white_level: float=254, max_stddev: float=1.5) -> bool:
         """Is the image almost white?
 
         Args:
             img (numpy.ndarray): image
             almost_white_level (int/numeric): if the average intensity per channel
-        is above the given level, decide "almost white" image.
+                is above the given level, decide "almost white" image.
+            max_stddev (float): max standard deviation for considering the image
+                almost constant.
 
         Returns:
             bool
         """
 
-        return img.mean() >= almost_white_level
+        return (img.mean() >= almost_white_level) and (img.std() <= max_stddev)
 
 
 #####
